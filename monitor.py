@@ -259,11 +259,11 @@ async def pumpfun_alert_processor(bot):
             if itype == "PRE_GRADUATION":
                 header = "🚀 PRE-GRADUATION ALERT"
                 desc   = f"BC {bc_pct}% — Akan graduate ke Raydium SEBENTAR LAGI!"
-                urgency_note = "⚡ *WINDOW SEMPIT* — biasanya pump 2-5x saat graduation"
+                urgency_note = "WINDOW SEMPIT — biasanya pump 2-5x saat graduation"
             else:
                 header = "📈 BC MILESTONE"
                 desc   = f"BC {bc_pct}% — Momentum kuat mendekati graduation"
-                urgency_note = "📌 Pantau terus, mendekati graduation threshold"
+                urgency_note = "Pantau terus, mendekati graduation threshold"
 
             # GMGN check
             gb, gs, gi = 0, None, []
@@ -1218,7 +1218,7 @@ async def cmd_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if args[0] == "check":
         if not config.HELIUS_API_KEY:
             await update.message.reply_text(
-                "❌ HELIUS_API_KEY belum diset.\nhttps://dev.helius.xyz/")
+                "❌ HELIUS\\_API\\_KEY belum diset.\nhttps://dev.helius.xyz/")
             return
         await update.message.reply_text(f"🔄 Polling {len(sm_wallets)} wallets...")
         await poll_smart_money_wallets(context.bot)
@@ -1265,7 +1265,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now    = time.time()
     active = sum(1 for t in seen_addresses.values()
                  if (now-t)/3600 <= SEEN_TTL_HOURS)
-    ws_s   = f"✅ BC≥{config.PUMPFUN_BC_MIN_PCT}% & ≥{config.PUMPFUN_BC_ALERT_PCT}% only" \
+    ws_s   = f"✅ BC>={config.PUMPFUN_BC_MIN_PCT}% & >={config.PUMPFUN_BC_ALERT_PCT}% only" \
              if config.ENABLE_PUMPFUN_WS else "❌"
     await update.message.reply_text(
         f"✅ *ONLINE v9*\n━━━━━━━━━━━━━━━━━━━\n"
@@ -1278,7 +1278,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👥 Holder check: {'✅'if config.ENABLE_HOLDER_CHECK else'❌'}\n"
         f"📡 Helius: {'✅'if config.HELIUS_API_KEY else'⚠️'}\n"
         f"⏰ {datetime.now().strftime('%H:%M:%S')} WIB\n\n"
-        f"🌙≥{config.SCORE_MOONBAG}|🎯≥{config.SCORE_SWING}|⚡≥{config.SCORE_SCALP}",
+        f"🌙>={config.SCORE_MOONBAG}|🎯>={config.SCORE_SWING}|⚡>={config.SCORE_SCALP}",
         parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_clearcache(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1330,12 +1330,13 @@ async def main():
         await app.start()
         bot = app.bot
 
+        # FIX: Ganti karakter ≥ dengan >= dan escape underscore di NEW_TOKEN
         await bot.send_message(
             chat_id=config.TELEGRAM_CHAT_ID,
             text=(
                 "🤖 *MEMECOIN MONITOR v9*\n━━━━━━━━━━━━━━━━━━━\n"
-                f"✅ WS: hanya BC≥{config.PUMPFUN_BC_MIN_PCT}% & ≥{config.PUMPFUN_BC_ALERT_PCT}%\n"
-                "✅ NEW_TOKEN noise: DIHAPUS\n"
+                f"✅ WS: hanya BC>={config.PUMPFUN_BC_MIN_PCT}% & >={config.PUMPFUN_BC_ALERT_PCT}%\n"
+                "✅ NEW\\_TOKEN noise: DIHAPUS\n"
                 "✅ Min SOL filter: aktif\n"
                 "✅ WS dedup per token: aktif\n"
                 "✅ Boosted = penalty\n"
