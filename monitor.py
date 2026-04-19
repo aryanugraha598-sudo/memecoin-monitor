@@ -10,24 +10,92 @@ import config
 # ─── DATA FETCHING ───────────────────────────────────────────
 
 def get_pumpfun_graduated():
-    """Ambil koin yang sudah graduate dari pump.fun via DexScreener"""
+    """Ambil token Solana trending dari DexScreener"""
+    all_pairs = []
+
     try:
-        url = "https://api.dexscreener.com/latest/dex/search?q=pump"
-        r = requests.get(url, timeout=10)
-        data = r.json()
-        pairs = data.get("pairs", [])
-        
-        # Filter hanya Solana + dari pump.fun
-        sol_pairs = [
-            p for p in pairs
-            if p.get("chainId") == "solana"
-            and "pump" in p.get("url", "").lower()
-            and p.get("dexId") in ["raydium", "pumpfun"]
-        ]
-        return sol_pairs
+        # Endpoint 1: Token profiles terbaru di Solana
+        url1 = "https://api.dexscreener.com/token-profiles/latest/v1"
+        r1 = requests.get(url1, timeout=10)
+        if r1.status_code == 200:
+            data1 = r1.json()
+            sol_tokens = [t for t in data1 if t.get("chainId") == "solana"]
+            print(f"  Token profiles found: {len(sol_tokens)}")
+
+            for token in sol_tokens[:30]:
+                addr = token.get("tokenAddress", "")
+                if not addr:
+                    continue
+                try:
+                    r_pair = requests.get(
+                        f"https://api.dexscreener.com/latest/dex/tokens/{addr}",
+                        timeout=8
+                    )
+                    if r_pair.status_code == 200:
+                        pair_data = r_pair.json()
+                        pairs = pair_data.get("pairs", [])
+                        if pairs:
+                            best = max(pairs, key=lambda x: float(x.get("liquidity", {}).get("usd", 0) or 0))
+                            all_pairs.append(best)
+                    time.sleep(0.2)
+                except:
+                    continue
     except Exception as e:
-        print(f"Error fetching pairs: {e}")
-        return []
+        print(f"Error endpoint 1: {e}")
+
+    try:
+        # Endpoint 2: Boosted tokens
+        url2 = "https://api.dexscreener.com/token-boosts/latest/v1"
+        r2 = requests.get(url2, timeout=10)
+        if r2.status_code == 200:
+            data2 = r2.json()
+            sol_boosted = [t for t in data2 if t.get("chainId") == "solana"]
+            print(f"  Boosted tokens found: {len(sol_boosted)}")
+
+            for token in sol_boosted[:20]:
+                addr = token.get("tokenAddress", "")
+                if not addr:
+                    continue
+                try:
+                    r_pair = requests.get(
+                        f"https://api.dexscreener.com/latest/dex/tokens/{addr}",
+                        timeout=8
+                    )
+                    if r_pair.status_code == 200:
+                        pair_data = r_pair.json()
+                        pairs = pair_data.get("pairs", [])
+                        if pairs:
+                            best = max(pairs, key=lambda x: float(x.get("liquidity", {}).get("usd", 0) or 0))
+                            existing_addrs = [p.get("baseToken", {}).get("address") for p in all_pairs]
+                            if best.get("baseToken", {}).get("address") not in existing_addrs:
+                                all_pairs.append(best)
+                    time.sleep(0.2)
+                except:
+                    continue
+    except Exception as e:
+        print(f"Error endpoint 2: {e}")
+
+    try:
+        # Endpoint 3: Trending Solana pairs langsung
+        url3 = "https://api.dexscreener.com/latest/dex/search?q=solana"
+        r3 = requests.get(url3, timeout=10)
+        if r3.status_code == 200:
+            data3 = r3.json()
+            sol_pairs = [
+                p for p in data3.get("pairs", [])
+                if p.get("chainId") == "solana"
+            ]
+            print(f"  Direct Solana pairs found: {len(sol_pairs)}")
+            for p in sol_pairs[:20]:
+                existing_addrs = [x.get("baseToken", {}).get("address") for x in all_pairs]
+                if p.get("baseToken", {}).get("address") not in existing_addrs:
+                    all_pairs.append(p)
+    except Exception as e:
+        print(f"Error endpoint 3: {e}")
+
+    print(f"Total pairs collected: {len(all_pairs)}")
+    return all_pairs
+
 
 def get_token_details(pair):
     """Extract detail dari pair data"""
@@ -37,7 +105,7 @@ def get_token_details(pair):
         volume = pair.get("volume", {})
         price_change = pair.get("priceChange", {})
         txns = pair.get("txns", {})
-        
+
         created_at = pair.get("pairCreatedAt", 0)
         age_hours = 0
         if created_at:
@@ -68,6 +136,7 @@ def get_token_details(pair):
     except Exception as e:
         print(f"Error parsing pair: {e}")
         return None
+
 
 # ─── SCORING ENGINE ──────────────────────────────────────────
 
@@ -138,6 +207,7 @@ def score_token(token):
 
     return score, reasons, warnings
 
+
 def classify_signal(score):
     if score >= config.SCORE_MOONBAG:
         return "🌙 MOONBAG CANDIDATE", "Hold berminggu-minggu jika narrative kuat"
@@ -147,6 +217,7 @@ def classify_signal(score):
         return "⚡ SCALP OPPORTUNITY", "Hold <2 jam, quick profit"
     else:
         return None, None
+
 
 # ─── FILTER ENGINE ───────────────────────────────────────────
 
@@ -163,15 +234,16 @@ def passes_filter(token):
         return False, "Market cap tidak valid"
     return True, "OK"
 
+
 # ─── TELEGRAM ALERT ──────────────────────────────────────────
 
 async def send_alert(token, score, signal_type, signal_desc, reasons, warnings):
     bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
-    
+
     mcap_str = "${:,.0f}".format(token["mcap"])
     liq_str = "${:,.0f}".format(token["liquidity_usd"])
     vol_str = "${:,.0f}".format(token["volume_24h"])
-    
+
     msg = f"""
 {signal_type}
 ━━━━━━━━━━━━━━━━━━━
@@ -190,13 +262,13 @@ async def send_alert(token, score, signal_type, signal_desc, reasons, warnings):
 ✅ *Kenapa Menarik:*
 {chr(10).join(reasons)}
 """
-    
+
     if warnings:
         msg += f"\n⚠️ *Warning:*\n{chr(10).join(warnings)}"
-    
+
     msg += f"\n\n🔗 [Chart & Trade]({token['pair_url']})"
-    msg += f"\n⏰ {datetime.now().strftime('%H:%M:%S WIB')}"
-    
+    msg += f"\n⏰ {datetime.now().strftime('%H:%M:%S')} WIB"
+
     await bot.send_message(
         chat_id=config.TELEGRAM_CHAT_ID,
         text=msg,
@@ -204,66 +276,104 @@ async def send_alert(token, score, signal_type, signal_desc, reasons, warnings):
         disable_web_page_preview=True
     )
 
+
+async def send_startup_message():
+    """Kirim pesan saat bot pertama kali nyala"""
+    bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
+    msg = """
+🤖 *MEMECOIN MONITOR AKTIF*
+━━━━━━━━━━━━━━━━━━━
+✅ Bot berhasil dinyalakan
+🔍 Scanning Solana tokens setiap 15 menit
+📊 Filter aktif:
+├ Min Liquidity: $30,000
+├ Min Volume 24h: $50,000
+├ Age: 1-72 jam
+└ Score minimum: 50/100
+
+⏳ Scan pertama sedang berjalan...
+"""
+    await bot.send_message(
+        chat_id=config.TELEGRAM_CHAT_ID,
+        text=msg,
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+
 # ─── MAIN LOOP ───────────────────────────────────────────────
 
 seen_tokens = set()
 
+
 async def run_scan():
-    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Scanning pump.fun graduated tokens...")
-    
+    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Scanning Solana tokens...")
+
     pairs = get_pumpfun_graduated()
-    print(f"Found {len(pairs)} pairs from pump.fun")
-    
+    print(f"Found {len(pairs)} pairs total")
+
     alerts_sent = 0
-    
+
     for pair in pairs:
         token = get_token_details(pair)
         if not token:
             continue
-        
-        # Skip yang sudah pernah di-alert
+
+        # Skip duplikat
         token_key = token["address"] + str(round(token["mcap"] / 10000))
         if token_key in seen_tokens:
             continue
-        
+
         # Filter
         passed, reason = passes_filter(token)
         if not passed:
+            print(f"  FILTERED: {token['name']} - {reason}")
             continue
-        
+
         # Score
         score, reasons, warnings = score_token(token)
         signal_type, signal_desc = classify_signal(score)
-        
+
+        print(f"  {token['name']} | Score: {score} | MCap: ${token['mcap']:,.0f} | Age: {token['age_hours']}h")
+
         if signal_type:
             seen_tokens.add(token_key)
-            print(f"  ALERT: {token['name']} | Score: {score} | {signal_type}")
-            
+            print(f"  >>> ALERT SENT: {signal_type}")
             await send_alert(token, score, signal_type, signal_desc, reasons, warnings)
             alerts_sent += 1
-            await asyncio.sleep(1)  # Rate limit telegram
-    
+            await asyncio.sleep(1)
+
     print(f"Scan complete. {alerts_sent} alerts sent.")
+
+    # Bersihkan seen_tokens kalau terlalu besar
+    if len(seen_tokens) > 500:
+        seen_tokens.clear()
+        print("Cleared seen_tokens cache")
+
 
 def run_async_scan():
     asyncio.run(run_scan())
 
+
 def main():
     print("=" * 50)
-    print("  MEMECOIN MONITOR - Solana/PumpFun")
+    print("  MEMECOIN MONITOR - Solana")
     print("=" * 50)
     print(f"Check interval: every {config.CHECK_INTERVAL_MINUTES} minutes")
+    print("Sending startup message to Telegram...")
+
+    # Kirim pesan startup ke Telegram
+    asyncio.run(send_startup_message())
+
     print("Starting first scan...")
-    
-    # Scan pertama langsung
     run_async_scan()
-    
-    # Schedule berikutnya
+
+    # Schedule scan berikutnya
     schedule.every(config.CHECK_INTERVAL_MINUTES).minutes.do(run_async_scan)
-    
+
     while True:
         schedule.run_pending()
         time.sleep(30)
+
 
 if __name__ == "__main__":
     main()
