@@ -5,18 +5,14 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "6008408532")
 
 # ─── FILTER ──────────────────────────────────────────────────
-MIN_LIQUIDITY_USD  = 20000    # Min liquidity $20k
-MIN_VOLUME_1H      = 1000     # Min vol 1h $1k
+MIN_LIQUIDITY_USD  = 15000
+MIN_VOLUME_1H      = 500       # Diturunkan — pump.fun bisa explosive dari kecil
 
-# ─── AGE SCORING ─────────────────────────────────────────────
-# Tidak ada hard limit umur lagi — semua koin bisa lolos.
-# Umur hanya mempengaruhi SCORE (koin tua perlu sinyal lebih kuat).
-# Tier umur (jam):
-AGE_TIER_FRESH      = 6      # < 6 jam  → bonus fresh graduate
-AGE_TIER_YOUNG      = 24     # < 24 jam → bonus muda
-AGE_TIER_NORMAL     = 168    # < 7 hari → normal
-AGE_TIER_OLD        = 720    # < 30 hari → sedikit penalty
-# >= 720 jam (30 hari+) → perlu resurrection kuat untuk lolos
+# ─── AGE SCORING (jam) ───────────────────────────────────────
+AGE_TIER_FRESH     = 6
+AGE_TIER_YOUNG     = 24
+AGE_TIER_NORMAL    = 168
+AGE_TIER_OLD       = 720
 
 # ─── SCORE THRESHOLDS ────────────────────────────────────────
 SCORE_MOONBAG = 75
@@ -24,33 +20,45 @@ SCORE_SWING   = 60
 SCORE_SCALP   = 45
 
 # ─── TIMING ──────────────────────────────────────────────────
-CHECK_INTERVAL_MINUTES    = 10   # Scan token setiap 10 menit
-WALLET_POLL_INTERVAL_MIN  = 3    # Poll SM wallet setiap 3 menit
+CHECK_INTERVAL_MINUTES   = 10
+WALLET_POLL_INTERVAL_MIN = 3
+
+# ─── PUMP.FUN WEBSOCKET ──────────────────────────────────────
+ENABLE_PUMPFUN_WS        = True
+# Min bonding curve % untuk alert (0-100)
+# 80-95% = zona paling explosive sebelum graduate
+PUMPFUN_BC_MIN_PCT       = 75
+PUMPFUN_BC_ALERT_PCT     = 90    # Alert khusus kalau BC > 90%
+# Min SOL terkumpul di bonding curve
+PUMPFUN_MIN_SOL          = 50
 
 # ─── FEATURES ────────────────────────────────────────────────
 ENABLE_TWITTER_CHECK     = True
-ENABLE_GMGN_SMART_MONEY  = True   # Cek top traders via GMGN public API (gratis, tanpa key)
+ENABLE_GMGN_SMART_MONEY  = True
+ENABLE_HOLDER_CHECK      = True   # Solscan holder distribution
+ENABLE_EXIT_MONITOR      = True   # Monitor sinyal exit untuk hold watchlist
 
-# ─── HELIUS API (opsional, untuk wallet activity polling) ────
-# Daftar gratis: https://dev.helius.xyz/
-# Kalau kosong, fitur /wallet check tetap jalan tapi tanpa Helius
+# ─── HELIUS (opsional) ───────────────────────────────────────
 HELIUS_API_KEY = os.environ.get("HELIUS_API_KEY", "")
 
-# ─── SMART MONEY WALLET LIST (manual, opsional) ─────────────
-# GMGN akan otomatis detect smart money per token.
-# Daftar ini untuk wallet yang mau kamu poll aktivitasnya secara real-time.
-# Cari dari: gmgn.ai leaderboard, nansen.ai, dune.com
+# ─── SMART MONEY WALLETS ─────────────────────────────────────
 SMART_MONEY_WALLETS = [
-    # "H72yLkhTnoBfhBTXXaj1RBXuirm8s8G5fcVh2XpQLggM",
+    # Tambah wallet dari komunitas:
+    # t.me/solanamemecoins, t.me/pumpfunalpha, gmgn.ai leaderboard
 ]
 
-# Bonus score per SM wallet / label GMGN yang ditemukan
+# ─── GMGN LABEL SCORES ───────────────────────────────────────
 GMGN_LABEL_SCORES = {
-    "smart_degen": 20,   # label GMGN: Smart Degen
-    "kol":         15,   # label GMGN: KOL (Key Opinion Leader)
-    "sniper":      18,   # label GMGN: Sniper
-    "insider":     25,   # label GMGN: Insider — tertinggi
-    "whale":       12,   # label GMGN: Whale
-    "smart":       15,   # generic "smart money"
+    "insider":     25,
+    "sniper":      18,
+    "smart_degen": 20,
+    "kol":         15,
+    "whale":       12,
+    "smart":       15,
 }
-GMGN_MAX_BONUS = 50     # cap total bonus dari GMGN
+GMGN_MAX_BONUS = 50
+
+# ─── EXIT SIGNAL THRESHOLDS ──────────────────────────────────
+EXIT_DUMP_PCT_1H    = -20    # Price drop 1h yang trigger exit warning
+EXIT_VOL_COLLAPSE   = 0.3    # Vol accel turun ke 30% dari sebelumnya = exit warning
+EXIT_BSR_DANGER     = 0.6    # Buy/sell ratio < 0.6 = distribusi berat
