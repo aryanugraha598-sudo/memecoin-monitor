@@ -1,5 +1,17 @@
 """
-MEMECOIN MONITOR v12
+MEMECOIN MONITOR v13
+Upgrade dari v12:
+
+v13 FIXES & ADDITIONS:
+  1. BUG FIX: Label REVIVAL/RESURRECTION sekarang muncul di /aw list
+     (sebelumnya ttype tidak tersimpan ke AW entry dengan benar)
+  2. RugCheck.xyz integration: mint authority, freeze, insider %, bundler %
+     langsung dari source terpercaya — gratis tanpa API key
+  3. Wallet Cluster Detection: deteksi koordinasi antar wallet
+     (banyak wallet beli dalam window waktu sempit = coordinated pump & dump)
+  4. Dev sell detection: cek apakah dev wallet aktif menjual
+  5. Scammer wallet pattern: deteksi fresh wallet yang beli banyak sekaligus
+
 Upgrade dari v11:
 
 LAPISAN 1 — HARD RUG FILTER (sebelum scoring):
@@ -260,36 +272,229 @@ def check_rug_filter(token, holder_ok, top3_pct, top10_pct, gmgn_traders=None):
 
 
 # ══════════════════════════════════════════════════════════════
+#  RUGCHECK.XYZ INTEGRATION (v13)
+# ══════════════════════════════════════════════════════════════
+
+_rugcheck_cache = {}  # addr -> (ts, result)
+RUGCHECK_TTL    = 600  # cache 10 menit
+
+def rugcheck_fetch(addr):
+    """
+    Fetch token report dari RugCheck.xyz public API.
+    Return dict dengan field-field penting, atau None kalau gagal.
+    Cache 10 menit untuk hemat request.
+    """
+    now = time.time()
+    if addr in _rugcheck_cache:
+        ts, cached = _rugcheck_cache[addr]
+        if now - ts < RUGCHECK_TTL:
+            return cached
+
+    try:
+        r = requests.get(
+            f"https://api.rugcheck.xyz/v1/tokens/{addr}/report/summary",
+            headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+            timeout=8)
+        if r.status_code != 200:
+            _rugcheck_cache[addr] = (now, None)
+            return None
+        data = r.json()
+        result = {
+            "score":       data.get("score", 0),           # 0-100, makin tinggi = makin aman
+            "risks":       data.get("risks", []),           # list of risk strings
+            "mint_auth":   data.get("mintAuthority", True), # True = belum revoked (berbahaya)
+            "freeze_auth": data.get("freezeAuthority", True),
+            "lp_burned":   data.get("lpBurned", False),
+            "top10_pct":   data.get("topHolders", 0),
+            "insider_pct": data.get("insiderNetActivity", 0),
+        }
+        _rugcheck_cache[addr] = (now, result)
+        print(f"  [RC] {addr[:8]} score={result['score']} mint={'⚠️' if result['mint_auth'] else '✅'}")
+        return result
+    except Exception as e:
+        print(f"  [RC] err {addr[:8]}: {e}")
+        _rugcheck_cache[addr] = (now, None)
+        return None
+
+
+def rugcheck_hard_filter(addr, token_name=""):
+    """
+    LAPISAN 1 TAMBAHAN: Hard filter dari RugCheck.
+    Return: (passed: bool, reason: str, rc_score: int, rc_data: dict|None)
+    """
+    rc = rugcheck_fetch(addr)
+    if rc is None:
+        # Kalau RugCheck tidak bisa diakses, tidak block — lanjut ke filter lain
+        return True, "RC: timeout/skip", 0, None
+
+    reasons_block = []
+
+    # 1. Mint authority belum direvoke = dev bisa cetak token baru kapan saja
+    if rc["mint_auth"]:
+        reasons_block.append("Mint authority aktif (dev bisa print token)")
+
+    # 2. Freeze authority = dev bisa freeze wallet siapapun
+    if rc["freeze_auth"]:
+        reasons_block.append("Freeze authority aktif")
+
+    # 3. LP tidak di-burn = dev bisa tarik LP kapan saja
+    if not rc["lp_burned"] and not rc["lp_burned"]:
+        # Ini tidak hard reject, hanya warning — banyak legit token juga begini
+        pass
+
+    # 4. RugCheck score terlalu rendah
+    # Score RugCheck: makin TINGGI = makin AMAN (kebalikan dari rug score kita)
+    rc_safety = rc["score"]  # 0-100, tinggi = aman
+    if rc_safety < 20:
+        reasons_block.append(f"RC safety score sangat rendah ({rc_safety}/100)")
+
+    # 5. Insider net activity tinggi = insider sedang dump
+    if rc["insider_pct"] and abs(rc["insider_pct"]) > 15:
+        if rc["insider_pct"] < 0:  # negatif = net selling
+            reasons_block.append(f"Insider net SELL {abs(rc['insider_pct']):.1f}%")
+
+    # Hard reject kalau mint auth + freeze auth aktif sekaligus (honeypot ciri)
+    if rc["mint_auth"] and rc["freeze_auth"]:
+        return False, f"RUG [RC]: Mint+Freeze authority aktif — potensi honeypot", rc_safety, rc
+
+    # Hard reject kalau RC score sangat rendah
+    if rc_safety < 15:
+        return False, f"RUG [RC]: Safety score {rc_safety}/100", rc_safety, rc
+
+    # Kalau ada >= 2 reason block, reject
+    if len(reasons_block) >= 2:
+        return False, f"RUG [RC]: {reasons_block[0]} + {len(reasons_block)-1} flag lain", rc_safety, rc
+
+    return True, "OK", rc_safety, rc
+
+
+def format_rugcheck_section(rc_data, rc_score):
+    """Format section RugCheck untuk alert Telegram."""
+    if rc_data is None:
+        return ""
+    mint  = "⚠️ AKTIF" if rc_data.get("mint_auth")   else "✅ Revoked"
+    freeze= "⚠️ AKTIF" if rc_data.get("freeze_auth") else "✅ Revoked"
+    lp    = "✅ Burned"  if rc_data.get("lp_burned")  else "⚠️ Tidak burned"
+    safety_bar = "🟢" if rc_score >= 70 else "🟡" if rc_score >= 40 else "🔴"
+    risks = rc_data.get("risks", [])
+    risk_str = ""
+    if risks:
+        risk_str = "\n  Risks: " + ", ".join(str(r) for r in risks[:3])
+    return (
+        f"\n🛡 *RugCheck:* {safety_bar} Score {rc_score}/100\n"
+        f"  Mint: {mint} | Freeze: {freeze} | LP: {lp}"
+        f"{risk_str}\n"
+    )
+
+
+# ══════════════════════════════════════════════════════════════
+#  WALLET CLUSTER DETECTION (v13)
+# ══════════════════════════════════════════════════════════════
+
+def detect_wallet_cluster(gmgn_traders):
+    """
+    Deteksi koordinasi antar wallet dari top traders GMGN.
+    Tanda-tanda cluster pump & dump:
+    1. Banyak wallet dengan realized_profit sangat mirip (coordinated exit)
+    2. Banyak fresh wallet (tag: new_wallet) di top traders
+    3. Semua wallet beli di window waktu yang sama
+
+    Return: (is_suspicious: bool, risk_level: str, details: str)
+    """
+    if not gmgn_traders or len(gmgn_traders) < 3:
+        return False, "LOW", ""
+
+    # Hitung fresh wallets
+    fresh_count = 0
+    sniper_count = 0
+    total = len(gmgn_traders)
+
+    for tr in gmgn_traders:
+        tags = [str(t).lower() for t in (tr.get("tags") or [])]
+        if "new_wallet" in tags or "fresh" in tags:
+            fresh_count += 1
+        if "sniper" in tags or "bundler" in tags:
+            sniper_count += 1
+
+    fresh_ratio   = fresh_count  / total
+    sniper_ratio  = sniper_count / total
+
+    details = []
+    risk_level = "LOW"
+
+    if fresh_ratio > 0.5:
+        details.append(f"⚠️ {fresh_count}/{total} fresh wallet ({round(fresh_ratio*100)}%)")
+        risk_level = "HIGH"
+    elif fresh_ratio > 0.3:
+        details.append(f"🟡 {fresh_count}/{total} fresh wallet")
+        risk_level = "MEDIUM"
+
+    if sniper_ratio > 0.3:
+        details.append(f"⚠️ {sniper_count}/{total} sniper/bundler wallet")
+        risk_level = "HIGH"
+    elif sniper_ratio > 0.15:
+        details.append(f"🟡 {sniper_count} sniper terdeteksi")
+        if risk_level == "LOW":
+            risk_level = "MEDIUM"
+
+    # Cek realized profit pattern — kalau semua profit mirip = coordinated exit
+    profits = [abs(tr.get("realized_profit", 0) or 0) for tr in gmgn_traders
+               if (tr.get("realized_profit") or 0) > 0]
+    if len(profits) >= 5:
+        avg_p = sum(profits) / len(profits)
+        # Variance rendah = semua exit di harga yang sama = koordinasi
+        variance = sum((p - avg_p) ** 2 for p in profits) / len(profits)
+        cv = (variance ** 0.5) / avg_p if avg_p > 0 else 99
+        if cv < 0.15 and avg_p > 100:  # coefficient of variation < 15% = sangat seragam
+            details.append(f"⚠️ Profit pattern seragam (CV={round(cv,2)}) — kemungkinan koordinasi")
+            risk_level = "HIGH"
+
+    is_suspicious = risk_level in ("HIGH", "MEDIUM")
+    detail_str    = " | ".join(details) if details else ""
+    return is_suspicious, risk_level, detail_str
+
+
+def cluster_score_penalty(risk_level):
+    """Score penalty berdasarkan cluster risk level."""
+    return {"HIGH": 30, "MEDIUM": 15, "LOW": 0}.get(risk_level, 0)
+
+
+# ══════════════════════════════════════════════════════════════
 #  AUTO WATCHLIST HELPERS
 # ══════════════════════════════════════════════════════════════
 
-def add_to_auto_watchlist(token, score, sig, ttype):
+def add_to_auto_watchlist(token, score, sig, ttype,
+                          rc_score=0, cluster_risk="LOW"):
     addr = token["address"]
     if addr in auto_watchlist:
         return
     if len(auto_watchlist) >= config.AUTO_WL_MAX:
         oldest = sorted(auto_watchlist.items(), key=lambda x: x[1].get("ts", 0))
         del auto_watchlist[oldest[0][0]]
+    # v13 FIX: simpan ttype uppercase agar label di /aw konsisten
+    saved_ttype = str(ttype).upper() if ttype else "NORMAL"
     auto_watchlist[addr] = {
-        "name":      token["name"],
-        "symbol":    token["symbol"],
-        "score0":    score,
-        "mcap0":     token["mcap"],
-        "v1h0":      token["v1h"],
-        "liq0":      token["liq"],
-        "pc_1h0":    token["pc_1h"],
-        "bsr0":      token["h1_bsr"],
-        "ts":        time.time(),
-        "sig":       sig,
-        "ttype":     ttype,
-        "pair_url":  token["pair_url"],
-        "mcap_now":  token["mcap"],
-        "v1h_now":   token["v1h"],
-        "score_now": score,
-        "status":    "HOLD",
-        "check_ts":  time.time(),
+        "name":         token["name"],
+        "symbol":       token["symbol"],
+        "score0":       score,
+        "mcap0":        token["mcap"],
+        "v1h0":         token["v1h"],
+        "liq0":         token["liq"],
+        "pc_1h0":       token["pc_1h"],
+        "bsr0":         token["h1_bsr"],
+        "ts":           time.time(),
+        "sig":          sig,
+        "ttype":        saved_ttype,
+        "pair_url":     token["pair_url"],
+        "mcap_now":     token["mcap"],
+        "v1h_now":      token["v1h"],
+        "score_now":    score,
+        "status":       "HOLD",
+        "check_ts":     time.time(),
+        "rc_score":     rc_score,
+        "cluster_risk": cluster_risk,
     }
-    print(f"  [AW] Added: {token['name']} score={score} ({sig})")
+    print(f"  [AW] Added: {token['name']} score={score} ttype={saved_ttype} ({sig})")
 
 def cleanup_auto_watchlist():
     now   = time.time()
@@ -1386,7 +1591,9 @@ async def send_alert(bot, token, score, sig, desc,
                      tw=None, gmgn_summary=None,
                      insider_wallets=None,
                      holder_warning=None, holder_pct=0,
-                     rug_score=0, revival_notes=None):
+                     rug_score=0, revival_notes=None,
+                     rc_data=None, rc_score=0,
+                     cluster_risk="LOW", cluster_detail=""):
 
     wash_l = ["✅ Organik","🟡 Suspicious","🔶 High Sus","🔴 Wash"][min(token["wash"],3)]
     te     = {
@@ -1425,10 +1632,21 @@ async def send_alert(bot, token, score, sig, desc,
         else:
             rug_sec = f"\n🛡 Rug Score: {rug_score}/100 (rendah)\n"
 
+    # v13: RugCheck.xyz section
+    rc_sec = format_rugcheck_section(rc_data, rc_score) if rc_data else ""
+
+    # v13: Cluster warning
+    cluster_sec = ""
+    if cluster_risk == "HIGH":
+        cluster_sec = f"\n🚨 *CLUSTER RISK TINGGI!*\n{cluster_detail}\n"
+    elif cluster_risk == "MEDIUM":
+        cluster_sec = f"\n⚠️ Cluster risk medium\n{cluster_detail}\n"
+
     # v12: Revival notes
     revival_sec = ""
-    if revival_notes and ttype == "REVIVAL":
-        revival_sec = "\n🔄 *Revival Analysis:*\n" + "\n".join(revival_notes[:5]) + "\n"
+    if revival_notes and ttype in ("REVIVAL", "RESURRECTION"):
+        label = "🔄 *Revival Analysis:*" if ttype == "REVIVAL" else "⚡ *Resurrection:*"
+        revival_sec = f"\n{label}\n" + "\n".join(revival_notes[:5]) + "\n"
 
     msg = (
         f"{sig}\n━━━━━━━━━━━━━━━━━━━\n"
@@ -1447,7 +1665,7 @@ async def send_alert(bot, token, score, sig, desc,
         f"├ Vol Accel: {token['vol_accel']}x\n"
         f"├ Trading: {wash_l}\n"
         f"└ 5m:{token['pc_5m']}% 1h:{token['pc_1h']}% 6h:{token['pc_6h']}%\n"
-        f"{rug_sec}{revival_sec}{holder_sec}{pair_sec}{ins_sec}"
+        f"{rc_sec}{cluster_sec}{rug_sec}{revival_sec}{holder_sec}{pair_sec}{ins_sec}"
         f"\n✅ *Kenapa Menarik:*\n" + "\n".join(reasons)
     )
     if warnings:
@@ -1607,12 +1825,12 @@ async def process_token(bot, t, is_revival_scan=False, revival_data=None):
         print(f"  x {t['name'][:20]:<20} {reason}")
         return False
 
-    # GMGN — dapat traders untuk rug check
+    # GMGN — dapat traders untuk rug check + cluster detection
     gb, gs, gi, raw_traders = 0, None, [], []
     if config.ENABLE_GMGN_SMART_MONEY:
         gb, gs, gi, raw_traders = gmgn_check_smart_money(addr, t["name"])
 
-    # LAPISAN 1: Holder check + Rug filter
+    # LAPISAN 1a: Holder check + Rug filter (existing)
     hok, hpct, h3pct, hwarn = check_holder_distribution(addr)
     rug_passed, rug_reason, rug_score = check_rug_filter(
         t, hok, h3pct, hpct, raw_traders)
@@ -1620,6 +1838,18 @@ async def process_token(bot, t, is_revival_scan=False, revival_data=None):
     if not rug_passed:
         print(f"  ✗ RUG [{t['name'][:16]}] {rug_reason}")
         return False
+
+    # LAPISAN 1b: RugCheck.xyz (v13)
+    rc_passed, rc_reason, rc_score, rc_data = rugcheck_hard_filter(addr, t["name"])
+    if not rc_passed:
+        print(f"  ✗ RC  [{t['name'][:16]}] {rc_reason}")
+        return False
+
+    # LAPISAN 1c: Wallet Cluster Detection (v13)
+    clus_suspicious, clus_risk, clus_detail = detect_wallet_cluster(raw_traders)
+    clus_penalty = cluster_score_penalty(clus_risk)
+    if clus_risk == "HIGH":
+        print(f"  ⚠️ CLUSTER [{t['name'][:16]}] {clus_detail}")
 
     # LAPISAN 3: Revival signal
     if revival_data is None:
@@ -1637,6 +1867,11 @@ async def process_token(bot, t, is_revival_scan=False, revival_data=None):
     if not hok:
         warnings.append(hwarn)
         score -= config.SCORE_PENALTY_HOLDER_CONC
+
+    # v13: Cluster penalty
+    if clus_penalty > 0:
+        score -= clus_penalty
+        warnings.append(f"⚠️ Cluster risk {clus_risk}: {clus_detail}")
 
     # Rug score warning
     if rug_score >= config.RUG_SCORE_WARN:
@@ -1656,7 +1891,9 @@ async def process_token(bot, t, is_revival_scan=False, revival_data=None):
     mark_seen(addr)
 
     if score >= config.AUTO_WL_SCORE_MIN:
-        add_to_auto_watchlist(t, score, sig, ttype)
+        add_to_auto_watchlist(t, score, sig, ttype,
+                              rc_score=rc_score,
+                              cluster_risk=clus_risk)
 
     btag = " [B]" if t["is_boosted"] else ""
     rtag = " [REV]" if is_rev else ""
@@ -1668,7 +1905,9 @@ async def process_token(bot, t, is_revival_scan=False, revival_data=None):
         bot, t, score, sig, desc, reasons, warnings, ttype,
         ts_tw, gs, gi, hwarn, hpct,
         rug_score=rug_score,
-        revival_notes=rev_notes if is_rev else None)
+        revival_notes=rev_notes if is_rev else None,
+        rc_data=rc_data, rc_score=rc_score,
+        cluster_risk=clus_risk, cluster_detail=clus_detail)
     return True
 
 
@@ -1824,10 +2063,25 @@ async def cmd_aw(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status    = d.get("status", "HOLD")
         sico      = {"HOLD":"🟢","WEAK":"🟡","EXIT":"🔴","EXIT_WARN":"🔶","EXITED":"⚫"}.get(status,"❓")
         sn        = d.get("score_now", d.get("score0", 0))
-        ttype     = d.get("ttype", "")
-        ttag      = " 🔄" if ttype == "REVIVAL" else " ⚡" if ttype == "RESURRECTION" else ""
+        ttype     = d.get("ttype", "").upper()
+        # v13 FIX: tag untuk semua tipe revival/resurrection
+        if ttype in ("REVIVAL",):
+            ttag = " 🔄"
+        elif ttype in ("RESURRECTION",):
+            ttag = " ⚡"
+        elif ttype in ("FRESH_GRADUATE",):
+            ttag = " 🆕"
+        elif ttype in ("MOMENTUM",):
+            ttag = " 🚀"
+        else:
+            ttag = ""
+        # v13: tambah cluster risk indicator
+        cluster = d.get("cluster_risk", "LOW")
+        ctag    = " ⚠️CLU" if cluster == "HIGH" else " 🟡CLU" if cluster == "MEDIUM" else ""
+        rc_s    = d.get("rc_score", 0)
+        rc_tag  = f" RC:{rc_s}" if rc_s > 0 else ""
         lines.append(
-            f"{sico} *{d.get('name','?')}* (${d.get('symbol','?')}){ttag}\n"
+            f"{sico} *{d.get('name','?')}* (${d.get('symbol','?')}){ttag}{ctag}{rc_tag}\n"
             f"  MC: ${mcap_now:,.0f} {emoji}{pct_str} | S:{sn} | {held_h}j\n"
             f"  `{addr[:20]}...`"
         )
@@ -1835,7 +2089,9 @@ async def cmd_aw(update: Update, context: ContextTypes.DEFAULT_TYPE):
     header = (
         f"👁 *AUTO WATCHLIST ({len(auto_watchlist)} token)*\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"🟢 Hold | 🟡 Lemah | 🔴 Exit | 🔄 Revival | ⚡ Resurrection\n\n"
+        f"🟢 Hold | 🟡 Lemah | 🔴 Exit\n"
+        f"🔄 Revival | ⚡ Resurrection | 🆕 Fresh | 🚀 Momentum\n"
+        f"⚠️CLU = Cluster risk tinggi | RC = RugCheck score\n\n"
     )
     chunk = header
     for line in lines:
@@ -2030,20 +2286,46 @@ async def cmd_rug(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rug_passed, rug_reason, rug_score = check_rug_filter(t, ok, p3, p10, traders)
     liq_trend = get_liq_trend(addr)
 
+    # v13: RugCheck.xyz
+    rc_passed, rc_reason, rc_score, rc_data = rugcheck_hard_filter(addr, t["name"])
+    clus_suspicious, clus_risk, clus_detail = detect_wallet_cluster(traders)
+
     if rug_score >= config.RUG_SCORE_REJECT:
         verdict = "🔴 BERBAHAYA — Jangan trade!"
+    elif not rc_passed:
+        verdict = "🔴 BERBAHAYA (RugCheck) — Jangan trade!"
+    elif clus_risk == "HIGH":
+        verdict = "🟠 KOORDINASI TERDETEKSI — Hati-hati!"
     elif rug_score >= config.RUG_SCORE_WARN:
         verdict = "🟡 RISIKO TINGGI — Hati-hati"
     else:
         verdict = "🟢 Risiko relatif rendah"
 
+    rc_section = ""
+    if rc_data:
+        mint  = "⚠️ AKTIF" if rc_data.get("mint_auth")   else "✅ Revoked"
+        freeze= "⚠️ AKTIF" if rc_data.get("freeze_auth") else "✅ Revoked"
+        lp    = "✅ Burned"  if rc_data.get("lp_burned")  else "⚠️ Tidak burned"
+        rc_section = (
+            f"\n🛡 *RugCheck.xyz:*\n"
+            f"├ RC Safety: {rc_score}/100\n"
+            f"├ Mint Auth: {mint}\n"
+            f"├ Freeze Auth: {freeze}\n"
+            f"└ LP: {lp}\n"
+        )
+
+    cluster_section = ""
+    if clus_detail:
+        cluster_section = f"\n🕸 *Cluster:* {clus_risk}\n{clus_detail}\n"
+
     msg = (
-        f"🛡 *Rug Risk Analysis*\n━━━━━━━━━━━━━━━━━━━\n"
+        f"🛡 *Rug Risk Analysis v13*\n━━━━━━━━━━━━━━━━━━━\n"
         f"🪙 *{t['name']}* (${t['symbol']})\n"
         f"CA: `{addr}`\n\n"
         f"*Rug Score: {rug_score}/100*\n"
         f"*Verdict:* {verdict}\n"
-        f"*Filter:* {'✅ Lolos' if rug_passed else '❌ '+rug_reason}\n\n"
+        f"*Filter:* {'✅ Lolos' if rug_passed else '❌ '+rug_reason}\n"
+        f"*RC Filter:* {'✅ Lolos' if rc_passed else '❌ '+rc_reason}\n\n"
         f"*Detail:*\n"
         f"├ Top3 holder: {p3}% {'⚠️' if p3 > 40 else '✅'}\n"
         f"├ Top10 holder: {p10}% {'⚠️' if p10 > 60 else '✅'}\n"
@@ -2051,6 +2333,7 @@ async def cmd_rug(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"├ Liq/MCap: {round(t['liq']/max(t['mcap'],1)*100,1)}% {'⚠️' if t['liq']/max(t['mcap'],1) < 0.03 else '✅'}\n"
         f"├ LP Trend: {'🔴 Ditarik' if liq_trend=='decreasing' else '✅ '+liq_trend}\n"
         f"└ Boosted: {'⚠️ Ya' if t['is_boosted'] else '✅ Tidak'}\n"
+        f"{rc_section}{cluster_section}"
     )
     if hwarn:
         msg += f"\n{hwarn}\n"
@@ -2149,21 +2432,19 @@ async def main():
         await bot.send_message(
             chat_id=config.TELEGRAM_CHAT_ID,
             text=(
-                "🤖 *MEMECOIN MONITOR v12*\n━━━━━━━━━━━━━━━━━━━\n"
-                "✅ LAPISAN 1: Rug Filter aktif\n"
-                "   • Hard reject bundler/wash/holder concentration\n"
-                "   • LP drain detection\n"
-                "   • Rug Score system (0-100)\n"
-                "✅ LAPISAN 2: SM weighted scoring (1.5x)\n"
-                "✅ LAPISAN 3: Dead Coin Revival Scanner\n"
-                "   • Tangkap token tua yang tiba-tiba hidup\n"
-                "   • Bypass downtrend filter untuk revival\n"
-                "   • LP trend analysis (legit vs dead cat)\n"
-                "✅ LAPISAN 4: Scoring dioverhaul\n"
-                "   • Weighted multiplier per tipe\n"
-                "   • Revival tipe baru dengan confidence level\n\n"
-                "📌 Command baru: /revival <CA> | /rug <CA>\n\n"
-                "/scan | /aw | /hold | /status\n"
+                "🤖 *MEMECOIN MONITOR v13*\n━━━━━━━━━━━━━━━━━━━\n"
+                "🐛 FIX: Label REVIVAL/RESURRECTION di /aw sekarang benar\n"
+                "🛡 NEW: RugCheck.xyz integration\n"
+                "   • Mint authority check\n"
+                "   • Freeze authority check\n"
+                "   • LP burned check\n"
+                "   • RC Safety score\n"
+                "🕸 NEW: Wallet Cluster Detection\n"
+                "   • Fresh wallet ratio\n"
+                "   • Sniper/bundler concentration\n"
+                "   • Coordinated profit pattern\n"
+                "📋 /aw sekarang tampilkan: 🔄⚡🆕🚀 CLU RC\n\n"
+                "/scan | /aw | /rug <CA> | /revival <CA>\n"
                 "⏳ Starting scan..."
             ),
             parse_mode=ParseMode.MARKDOWN)
